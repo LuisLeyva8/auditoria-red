@@ -1,21 +1,28 @@
-# Logs
-logs
+venv/
+python-back/venv/
+*.pyc
+__pycache__/
+*.pyd
+*.so
+.python-version
+.pytest_cache/
+.env
+.flaskenv
+node_modules
+dist/
+dist-ssr/
+build/
+*.local
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
-
-node_modules
-dist
-dist-ssr
-*.local
-
-# Editor directories and files
 .vscode/*
-!.vscode/extensions.json
-.idea
+!.vscode/extensions.json # Mantener configuración de extensiones
+.idea/
 .DS_Store
 *.suo
 *.ntvs*

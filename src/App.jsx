@@ -1,383 +1,394 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, Zap, Shield, XCircle, CheckCircle, Clock } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Zap, XCircle, CheckCircle, Lock, Unlock, Wifi, Server, Cpu, Router } from 'lucide-react';
 
-// --- CONFIGURACIÓN DE LA APLICACIÓN Y BACKEND ---
-// NOTA: Asume que el servidor Flask se ejecuta en http://127.0.0.1:5000
-const API_URL = 'http://127.0.0.1:5000/api';
-const POLLING_INTERVAL_MS = 1500; // Intervalo de actualización de datos
-const PACKET_RATE_CHECK_INTERVAL_COUNT = 5; // Debe coincidir con el servidor Python
-const SIMULATION_INTERVAL_MS = 1500; // Debe coincidir con el servidor Python (para el cálculo de la ventana)
+// --- CONFIGURACIÓN DEL FRONTEND ---
+const API_BASE_URL = 'http://127.0.0.1:5000/api';
+const REFRESH_INTERVAL_MS = 1500; // Frecuencia de petición al backend
+const DEFAULT_PACKET_LIMIT = 1500; // Constante utilizada si el dispositivo no tiene límite establecido
 
-// Componente principal
+// Componente principal de la aplicación
 const App = () => {
-  const [devices, setDevices] = useState([]);
-  const [systemStatus, setSystemStatus] = useState('Inactivo');
-  const [isLoading, setIsLoading] = useState(false);
-  const [alertMessage, setAlertMessage] = useState('');
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [selectedDevice, setSelectedDevice] = useState(null);
-  const [logs, setLogs] = useState([]);
+    const [devices, setDevices] = useState([]);
+    const [status, setStatus] = useState({ 
+        isRunning: false, 
+        isAttackMode: false, 
+        attackerIp: null, 
+        simulating: true 
+    });
+    const [log, setLog] = useState([]);
+    const [selectedDevice, setSelectedDevice] = useState(null);
+    const [modalOpen, setModalOpen] = useState(false);
+    const [newLimit, setNewLimit] = useState('');
 
-  // --- LÓGICA DE UTILIDAD ---
+    const intervalRef = useRef(null);
+    const logContainerRef = useRef(null);
 
-  const formatTime = (ms) => {
-    const totalSeconds = Math.floor(ms / 1000);
-    const days = Math.floor(totalSeconds / (3600 * 24));
-    const hours = Math.floor((totalSeconds % (3600 * 24)) / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    let parts = [];
-    if (days > 0) parts.push(`${days}d`);
-    if (hours > 0) parts.push(`${hours}h`);
-    if (minutes > 0) parts.push(`${minutes}m`);
-    if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
-    return parts.join(' ');
-  };
+    // Función para obtener datos del backend
+    const fetchNetworkStatus = useCallback(async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/network_status`);
+            if (!response.ok) throw new Error('Network response was not ok');
+            const data = await response.json();
 
-  const addLog = (ip, message, type) => {
-    const timestamp = new Date().toLocaleTimeString();
-    setLogs(prevLogs => [{ timestamp, ip, message, type }, ...prevLogs]);
-  };
+            // 1. Detección de Bloqueos (para el log)
+            data.devices.forEach(newDevice => {
+                const oldDevice = devices.find(d => d.ip === newDevice.ip);
+                if (newDevice.status === 'Blocked' && (!oldDevice || oldDevice.status !== 'Blocked')) {
+                    const currentRate = newDevice.recentPacketHistory ? newDevice.recentPacketHistory.reduce((a, b) => a + b, 0) : 0;
+                    addLogEntry(
+                        `[BLOQUEO AUTOMÁTICO] Host ${newDevice.id} (${newDevice.ip}) bloqueado. Tasa de ${currentRate} Pkts/ventana excede límite de ${newDevice.packetLimit}. Protocolo detectado: ${newDevice.last_protocol || 'N/A'}.`, 
+                        'critical'
+                    );
+                }
+            });
 
-  const showAlert = (message, type) => {
-    setAlertMessage({ message, type });
-  };
+            // 2. Actualizar estado y dispositivos
+            setDevices(data.devices);
+            setStatus(prevStatus => ({
+                ...prevStatus,
+                isRunning: true,
+                isAttackMode: data.status.isAttackMode,
+                attackerIp: data.status.attackerIp,
+                simulating: data.status.simulating
+            }));
 
-  // --- LÓGICA DE COMUNICACIÓN CON FLASK ---
-
-  const fetchNetworkStatus = useCallback(async () => {
-    if (systemStatus === 'Inactivo') return;
-
-    try {
-      setIsLoading(true);
-      const response = await fetch(`${API_URL}/network_status`);
-      if (!response.ok) throw new Error('Error al obtener el estado de la red.');
-
-      const newDevices = await response.json();
-      
-      // Procesar y actualizar logs y alertas
-      newDevices.forEach(newDev => {
-        const oldDev = devices.find(d => d.ip === newDev.ip);
-        
-        if (oldDev && newDev.status !== oldDev.status) {
-          const logType = newDev.status === 'ALERT' ? 'warning' : newDev.status === 'Blocked' ? 'critical' : 'normal';
-          const alertMsg = newDev.status === 'ALERT' 
-            ? `ALERTA: Tasa de paquetes anómala detectada en ${newDev.ip}.`
-            : newDev.status === 'Blocked' 
-            ? `¡BLOQUEADO! Dispositivo ${newDev.ip} ha sido aislado.` // Esto solo si la función de bloqueo estuviera activa
-            : `Dispositivo ${newDev.ip} ha vuelto a la normalidad.`;
-          
-          if (logType !== 'normal') {
-            addLog(newDev.ip, alertMsg, logType);
-            showAlert(alertMsg, logType);
-          }
-        } 
-        
-        // Loguear tráfico si el conteo de paquetes no es trivial
-        if (oldDev && newDev.packetsSent > oldDev.packetsSent) {
-          const packetsThisTurn = newDev.packetsSent - oldDev.packetsSent;
-          if (packetsThisTurn > 100) { // Si más de 100 paquetes por ciclo, loguear
-            addLog(newDev.ip, `Paquetes enviados: ${packetsThisTurn.toFixed(0)}`, newDev.status === 'ALERT' ? 'warning' : 'normal');
-          }
+        } catch (error) {
+            console.error("Error al obtener estado de red:", error);
+            setStatus(prevStatus => ({ ...prevStatus, isRunning: false }));
+            clearInterval(intervalRef.current);
+            addLogEntry(`[ERROR] Desconectado del servidor Flask. ${error.message}`, 'critical');
         }
-      });
+    }, [devices]);
 
-      setDevices(newDevices);
-      setIsLoading(false);
+    // Bucle de polling para actualizar el estado
+    useEffect(() => {
+        if (status.isRunning) {
+            if (intervalRef.current) clearInterval(intervalRef.current);
+            intervalRef.current = setInterval(fetchNetworkStatus, REFRESH_INTERVAL_MS);
+        } else {
+            if (intervalRef.current) clearInterval(intervalRef.current);
+        }
+        
+        // Limpieza al desmontar
+        return () => {
+            if (intervalRef.current) clearInterval(intervalRef.current);
+        };
+    }, [status.isRunning, fetchNetworkStatus]);
 
-      // Actualizar estado general del sistema basado en los dispositivos
-      const hasAlert = newDevices.some(d => d.status === 'ALERT');
-      const isBlocked = newDevices.some(d => d.status === 'Blocked');
-      
-      if (isBlocked) {
-        setSystemStatus('Amenaza Contenida');
-      } else if (hasAlert) {
-        setSystemStatus('ALERTA - Tráfico Anómalo');
-      } else {
-        setSystemStatus('Sistema Operacional - Monitoreando');
-      }
+    // Scroll automático del log
+    useEffect(() => {
+        if (logContainerRef.current) {
+            logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+        }
+    }, [log]);
 
-    } catch (error) {
-      console.error('Error al obtener datos de red:', error);
-      setIsLoading(false);
-      setSystemStatus('Error de Conexión');
-    }
-  }, [systemStatus, devices]);
+    // --- MANEJO DE ESTADO Y LOGS ---
 
+    const addLogEntry = (message, type = 'normal') => {
+        setLog(prevLog => {
+            const newEntry = { timestamp: new Date().toLocaleTimeString(), message, type };
+            // Limitar el log a 100 entradas
+            return [...prevLog.slice(-99), newEntry]; 
+        });
+    };
 
-  // --- MANEJADORES DE ACCIONES ---
-
-  const handleStart = () => {
-    setSystemStatus('Sistema Operacional - Monitoreando');
-    setLogs([{ timestamp: new Date().toLocaleTimeString(), ip: 'SYSTEM', message: 'Monitoreo iniciado. Conectando al servidor Flask...', type: 'normal' }]);
-    setAlertMessage('');
-  };
-
-  const handleReset = async () => {
-    try {
-      await fetch(`${API_URL}/reset`, { method: 'POST' });
-      setSystemStatus('Inactivo');
-      setDevices([]);
-      setLogs([]);
-      setAlertMessage('');
-    } catch (error) {
-      console.error('Error al resetear:', error);
-      showAlert('Error al intentar resetear el servidor.', 'critical');
-    }
-  };
-
-  const openModal = (device) => {
-    setSelectedDevice(device);
-    setIsModalOpen(true);
-  };
-
-  const closeModal = () => {
-    setIsModalOpen(false);
-    setSelectedDevice(null);
-  };
-
-  const handleToggleBlock = async () => {
-    if (!selectedDevice) return;
-    const action = selectedDevice.status === 'Blocked' ? 'unblock' : 'block';
+    const handleStartSimulation = () => {
+        setStatus(prevStatus => ({ ...prevStatus, isRunning: true }));
+        addLogEntry("[INICIO] Iniciando conexión con el Auditor de Red...", 'normal');
+        fetchNetworkStatus();
+    };
     
-    try {
-      // Simular la acción en el servidor (el servidor Flask tiene los endpoints /block y /unblock)
-      const response = await fetch(`${API_URL}/device/${selectedDevice.ip}/${action}`, { method: 'POST' });
-      if (!response.ok) throw new Error(`Fallo al ${action} el dispositivo.`);
+    // Eliminada handleAttackSimulation
 
-      const message = await response.json();
-      
-      addLog(selectedDevice.ip, `Acción manual: ${message.message}`, action === 'block' ? 'critical' : 'normal');
-      showAlert(message.message, action === 'block' ? 'critical' : 'normal');
+    const handleReset = async () => {
+        clearInterval(intervalRef.current);
+        // Resetting all fields to initial state
+        setStatus({ isRunning: false, isAttackMode: false, attackerIp: null, simulating: true });
+        setDevices([]);
+        setLog([]);
+        try {
+            await fetch(`${API_BASE_URL}/reset`, { method: 'POST' });
+        } catch (error) {
+            console.error("Error al resetear backend:", error);
+        }
+        addLogEntry("[REINICIO] Estado de red reseteado.", 'normal');
+    };
 
-      // Actualizar el estado local (la próxima llamada a fetchNetworkStatus lo confirmará)
-      const updatedDevices = devices.map(d => 
-        d.ip === selectedDevice.ip ? { ...d, status: action === 'block' ? 'Blocked' : 'Connected' } : d
-      );
-      setDevices(updatedDevices);
-      setSelectedDevice(prev => ({ ...prev, status: action === 'block' ? 'Blocked' : 'Connected' }));
-      
-    } catch (error) {
-      showAlert(`Error en el control manual: ${error.message}`, 'critical');
-    }
-  };
+    const handleOpenModal = (device) => {
+        setSelectedDevice(device);
+        setNewLimit(device.packetLimit || DEFAULT_PACKET_LIMIT);
+        setModalOpen(true);
+    };
 
-  const handleApplyLimit = () => {
-    if (!selectedDevice) return;
-    const newLimit = parseInt(document.getElementById('data-limit-input').value);
+    const handleCloseModal = () => {
+        setModalOpen(false);
+        setSelectedDevice(null);
+    };
 
-    if (isNaN(newLimit) || newLimit < 500) {
-      showAlert("El límite debe ser un número entero válido mayor o igual a 500 Paquetes.", 'warning');
-      return;
-    }
+    // --- ACCIONES DE DISPOSITIVO (Bloqueo/Límite) ---
+    const updateDeviceAction = async (action, limit = null) => {
+        if (!selectedDevice) return;
 
-    // Como es solo un simulador de límite, lo actualizamos solo en el frontend por ahora
-    const updatedDevices = devices.map(d => 
-      d.ip === selectedDevice.ip ? { ...d, packetRateLimit: newLimit } : d
-    );
-    setDevices(updatedDevices);
-    setSelectedDevice(prev => ({ ...prev, packetRateLimit: newLimit }));
+        try {
+            const payload = { ip: selectedDevice.ip, action, limit: limit !== null ? parseInt(limit, 10) : undefined };
+            const response = await fetch(`${API_BASE_URL}/device_action`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
 
-    showAlert(`Límite de TASA para ${selectedDevice.ip} establecido en ${newLimit} Paquetes.`, 'normal');
-  };
+            if (response.ok) {
+                const updatedDevice = await response.json();
+                
+                // Actualizar estado local
+                setDevices(prevDevices => 
+                    prevDevices.map(d => d.ip === selectedDevice.ip ? { ...d, status: updatedDevice.device.status, packetLimit: updatedDevice.device.packetLimit } : d)
+                );
+                setSelectedDevice(prev => ({ ...prev, status: updatedDevice.device.status, packetLimit: updatedDevice.device.packetLimit }));
+                
+                // Registro más detallado
+                if (action === 'block') addLogEntry(`[BLOQUEO MANUAL] Host ${selectedDevice.id} (${selectedDevice.ip}) bloqueado por administrador. Último protocolo: ${selectedDevice.last_protocol || 'N/A'}.`, 'critical');
+                if (action === 'unblock') addLogEntry(`[DESBLOQUEO MANUAL] Host ${selectedDevice.id} (${selectedDevice.ip}) desbloqueado.`, 'normal');
+                if (limit !== null) addLogEntry(`[LÍMITE] Límite de tasa para ${selectedDevice.ip} actualizado a ${newLimit} paquetes.`, 'normal');
+                
+                if (action !== 'limit') handleCloseModal();
+            }
+        } catch (error) {
+            console.error("Error al realizar acción:", error);
+        }
+    };
 
-  // --- HOOKS DE EFECTO ---
+    // --- RENDERIZADO DE UTILIDAD ---
+    const getStatusIndicator = () => {
+        let colorClass = 'bg-gray-500';
+        let text = 'Inactivo';
 
-  // Polling para obtener el estado de la red
-  useEffect(() => {
-    let interval;
-    if (systemStatus !== 'Inactivo' && systemStatus !== 'Error de Conexión') {
-      interval = setInterval(fetchNetworkStatus, POLLING_INTERVAL_MS);
-    }
-    return () => clearInterval(interval);
-  }, [fetchNetworkStatus, systemStatus]);
+        if (status.isRunning && status.simulating) {
+            colorClass = 'bg-yellow-500 animate-pulse';
+            text = 'Auditoría en Fallback (Simulación)';
+        } else if (status.isRunning && !status.simulating) {
+            colorClass = 'bg-green-500';
+            text = 'Auditoría Real Activa';
+        }
 
-  // --- RENDERIZADO DEL ESTADO DEL SISTEMA ---
+        const blockedCount = devices.filter(d => d.status === 'Blocked').length;
+        if (blockedCount > 0) {
+            colorClass = 'bg-red-600 blinking';
+            text = `Amenaza Contenida (${blockedCount} Bloqueados)`;
+        }
+        
+        return { colorClass, text };
+    };
 
-  const renderSystemStatus = () => {
-    let indicatorClass = 'bg-gray-500';
-    let textClass = 'text-gray-400';
-    let isBlinking = false;
-
-    if (systemStatus.includes('Operacional')) {
-      indicatorClass = 'bg-green-500';
-      textClass = 'text-green-400';
-    } else if (systemStatus.includes('ALERTA')) {
-      indicatorClass = 'bg-yellow-500';
-      textClass = 'text-yellow-400';
-      isBlinking = true;
-    } else if (systemStatus.includes('Contenida') || systemStatus.includes('Error')) {
-      indicatorClass = 'bg-red-500';
-      textClass = 'text-red-400';
-    }
-
-    return (
-      <div className="card p-4 cursor-default">
-        <h2 className="text-xl font-semibold text-white mb-3">Estado del Sistema</h2>
-        <div id="system-status" className="flex items-center gap-3 p-3 rounded-lg bg-gray-800">
-          <div className={`w-4 h-4 rounded-full ${indicatorClass} ${isBlinking ? 'blinking' : ''}`} id="status-indicator"></div>
-          <span id="status-text" className={`font-medium ${textClass}`}>{systemStatus}</span>
-        </div>
-        {alertMessage && (
-          <div className={`p-3 rounded-lg border-l-4 mt-4 ${alertMessage.type === 'critical' ? 'bg-red-500/10 border-red-500' : 'bg-yellow-500/10 border-yellow-500'}`}>
-            <p className="font-bold">{alertMessage.type === 'critical' ? '¡AMENAZA DETECTADA!' : 'ALERTA DE SEGURIDAD'}</p>
-            <p className="text-sm text-gray-300">{alertMessage.message}</p>
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  // --- RENDERIZADO DEL MODAL ---
-  
-  const DeviceModal = () => {
-    if (!selectedDevice) return null;
-
-    const connectionDurationMs = Date.now() - selectedDevice.connectionStartTime || 0;
-    const formattedTime = formatTime(connectionDurationMs);
-
-    const isBlocked = selectedDevice.status === 'Blocked';
-    const blockBtnClass = isBlocked ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700';
+    const StatusBlock = getStatusIndicator();
 
     return (
-      <div className={`fixed inset-0 bg-black bg-opacity-75 z-50 ${isModalOpen ? 'flex' : 'hidden'} items-center justify-center p-4`}>
-        <div className="card w-full max-w-lg p-6 space-y-4 cursor-default">
-          <h2 className="text-2xl font-bold text-white border-b border-gray-600 pb-2">Detalles de {selectedDevice.id}</h2>
-          
-          <div className="grid grid-cols-2 gap-4 text-sm">
-            <div><p className="text-gray-400">ID:</p><p className="text-white font-medium">{selectedDevice.id}</p></div>
-            <div><p className="text-gray-400">IP:</p><p className="text-white font-medium">{selectedDevice.ip}</p></div>
-            <div><p className="text-gray-400">Tiempo Conectado:</p><p className="text-white font-medium">{formattedTime}</p></div>
-            <div><p className="text-gray-400">Paquetes Enviados (Total):</p><p className="text-white font-medium">{selectedDevice.packetsSent.toFixed(0)} Paquetes</p></div>
-            <div className="col-span-2"><p className="text-gray-400">Media de Paquetes Diaria Simulada:</p><p className="text-white font-medium">{selectedDevice.dailyAverage} Paquetes</p></div>
-          </div>
+        <div className="min-h-screen p-4 sm:p-6 lg:p-8 bg-gray-900 text-gray-100 font-inter">
+            <style>{`
+                .card { background-color: #1F2937; border: 1px solid #374151; border-radius: 0.75rem; }
+                .log-entry { font-family: 'Courier New', Courier, monospace; font-size: 0.875rem; padding: 0.5rem 0.75rem; border-radius: 0.375rem; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center; }
+                .log-normal { background-color: rgba(16, 185, 129, 0.1); border-left: 3px solid #10B981; }
+                .log-warning { background-color: rgba(245, 158, 11, 0.1); border-left: 3px solid #F59E0B; }
+                .log-critical { background-color: rgba(239, 68, 68, 0.1); border-left: 3px solid #EF4444; }
+                .blinking { animation: blinker 1s linear infinite; }
+                @keyframes blinker { 50% { opacity: 0.3; } }
+            `}</style>
+            
+            <div className="max-w-7xl mx-auto">
+                {/* Encabezado */}
+                <header className="mb-8 text-center">
+                    <h1 className="text-3xl sm:text-4xl font-bold text-white mb-2">Auditor de Red de Detección de Desvío (Flask/React)</h1>
+                    <p className="text-lg text-gray-400">Monitoreo y Contraataque Basado en Tasa de Paquetes</p>
+                    {status.isRunning && status.simulating && (
+                        <p className="text-sm text-yellow-400 mt-2">
+                            Advertencia: Actualmente en **Modo Simulación (Fallback)**. El backend Python no pudo inicializar la auditoría real (Scapy).
+                        </p>
+                    )}
+                </header>
 
-          <div className="pt-4 border-t border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-2">Gestión de Límite de Tasa de Paquetes</h3>
-            <p className="text-sm text-gray-400 mb-2">Umbral de paquetes en los últimos ${PACKET_RATE_CHECK_INTERVAL_COUNT * SIMULATION_INTERVAL_MS / 1000} segundos para activar el bloqueo.</p>
-            <div className="flex items-center space-x-2">
-              <input type="number" id="data-limit-input" min="500" defaultValue={selectedDevice.packetRateLimit} className="flex-grow p-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-yellow-500 focus:border-yellow-500" placeholder="Nuevo Límite (Paquetes)"/>
-              <button onClick={handleApplyLimit} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">Aplicar Límite</button>
-            </div>
-            <p className="text-sm text-gray-400 mt-2">Límite actual: {selectedDevice.packetRateLimit} Paquetes</p>
-          </div>
+                {/* Controles */}
+                <div className="card p-4 mb-6 flex flex-wrap justify-center items-center gap-4">
+                    <button 
+                        onClick={handleStartSimulation} 
+                        className={`font-bold py-2 px-4 rounded-lg transition-colors ${status.isRunning ? 'bg-blue-800 text-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}
+                        disabled={status.isRunning}
+                    >
+                        {status.isRunning ? 'Auditoría en Curso...' : 'Iniciar Auditoría'}
+                    </button>
+                    <button 
+                        onClick={handleReset} 
+                        className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg transition-colors"
+                    >
+                        Reiniciar
+                    </button>
+                </div>
 
-          <div className="pt-4 border-t border-gray-700 flex justify-between items-center">
-            <button 
-              onClick={handleToggleBlock} 
-              className={`font-bold py-2 px-4 rounded-lg transition-colors ${blockBtnClass}`}
-            >
-              {isBlocked ? 'Desbloquear Dispositivo' : 'Bloquear Dispositivo'}
-            </button>
-            <button onClick={closeModal} className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">Cerrar</button>
-          </div>
-        </div>
-      </div>
-    );
-  };
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
-
-  // --- LAYOUT PRINCIPAL ---
-  return (
-    <div className="p-4 sm:p-6 lg:p-8">
-      <div className="max-w-7xl mx-auto">
-        <header className="mb-8 text-center">
-          <h1 className="text-3xl sm:text-4xl font-bold text-white mb-2">Auditor de Extracción de Red (React/Flask)</h1>
-          <p className="text-lg text-gray-400">Monitoreo funcional en tiempo real para detección de exfiltración de paquetes</p>
-        </header>
-
-        {/* Controles */}
-        <div className="card p-4 mb-6 flex flex-wrap justify-center items-center gap-4 cursor-default">
-            <button 
-              onClick={handleStart} 
-              disabled={systemStatus !== 'Inactivo' && systemStatus !== 'Error de Conexión'}
-              className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition-colors disabled:opacity-50"
-            >
-              <RefreshCw className="inline w-4 h-4 mr-2" />
-              Iniciar Auditoría
-            </button>
-            <button 
-              onClick={handleReset} 
-              className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg transition-colors"
-            >
-              Reiniciar Servidor
-            </button>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-
-          {/* Dispositivos Conectados */}
-          <div className="lg:col-span-1">
-            <div className="card p-4 h-full cursor-default">
-              <h2 className="text-xl font-semibold text-white mb-4 border-b border-gray-600 pb-2">Dispositivos Conectados ({devices.length})</h2>
-              <div id="device-list" className="space-y-3">
-                {isLoading && devices.length === 0 ? (
-                    <p className="text-yellow-400 text-center py-8 flex items-center justify-center">
-                        <RefreshCw className="animate-spin w-5 h-5 mr-2" /> Cargando datos...
-                    </p>
-                ) : devices.length === 0 ? (
-                    <p className="text-gray-500 text-center py-8">Auditoría no iniciada o error de conexión.</p>
-                ) : (
-                    devices.map(device => {
-                      const statusColorClass = device.status === 'ALERT' ? 'text-yellow-400' : device.status === 'Blocked' ? 'text-red-500' : 'text-green-400';
-                      const statusIcon = device.status === 'Blocked' ? <XCircle className="h-5 w-5" /> : <CheckCircle className="h-5 w-5" />;
-                      
-                      return (
-                        <div 
-                          key={device.ip}
-                          className={`card p-3 flex justify-between items-center transition-all duration-300 ${device.status === 'Blocked' ? 'border-red-500' : (device.status === 'ALERT' ? 'border-yellow-500' : 'hover:bg-gray-700')}`}
-                          onClick={() => openModal(device)}
-                        >
-                          <div>
-                            <p className="font-semibold text-white">{device.id} {device.isAttacker && <Zap className="inline w-4 h-4 text-red-400 ml-1" />}</p>
-                            <p className="text-sm text-gray-400">{device.ip}</p>
-                          </div>
-                          <div className="text-right">
-                            <p className="font-mono text-white text-lg">{device.packetsSent.toFixed(0)} Pkts</p>
-                            <div className={`flex items-center justify-end gap-1 text-sm ${statusColorClass}`}>
-                              {statusIcon}
-                              <span>{device.status === 'ALERT' ? 'Alerta' : (device.status === 'Blocked' ? 'Bloqueado' : 'Conectado')}</span>
+                    {/* Columna de Dispositivos Conectados (Mejorada) */}
+                    <div className="lg:col-span-1">
+                        <div className="card p-4 h-full">
+                            <h2 className="text-xl font-semibold text-white mb-4 border-b border-gray-600 pb-2">Dispositivos Detectados ({devices.length})</h2>
+                            <div id="device-list" className="space-y-3 max-h-96 overflow-y-auto pr-2">
+                                {devices.length === 0 ? (
+                                    <p className="text-gray-500 text-center py-8">Esperando la detección de tráfico...</p>
+                                ) : (
+                                    devices.map(device => (
+                                        <div 
+                                            key={device.ip} 
+                                            className={`card p-3 flex justify-between items-center transition-all duration-300 cursor-pointer hover:bg-gray-700 ${device.status === 'Blocked' ? 'border-red-500 border-l-4' : 'border-l-4 border-transparent'}`}
+                                            onClick={() => handleOpenModal(device)}
+                                        >
+                                            <div className="flex flex-col">
+                                                <p className="font-semibold text-white flex items-center gap-2">
+                                                    {device.status === 'Blocked' ? <XCircle size={16} className="text-red-500" /> : <CheckCircle size={16} className="text-green-500" />}
+                                                    {device.id} 
+                                                    {device.is_local ? <Router size={16} className="text-blue-400 ml-1" title="Host Local" /> : null}
+                                                </p>
+                                                <p className="text-xs text-gray-400 font-mono">{device.ip}</p>
+                                                <p className="text-xs text-gray-500 mt-1">
+                                                    Último Protocolo: 
+                                                    <span className="font-mono text-cyan-400 ml-1">{device.last_protocol || 'N/A'}</span>
+                                                    {device.last_port && <span className="text-gray-600 ml-2">Puerto: {device.last_port}</span>}
+                                                </p>
+                                            </div>
+                                            <div className="text-right">
+                                                <p className="font-mono text-white text-lg">{device.packetCount.toLocaleString()} Pkts</p>
+                                                <div className={`flex items-center justify-end gap-1 text-sm ${device.status === 'Blocked' ? 'text-red-500' : 'text-green-400'}`}>
+                                                    <span>{device.status}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
                             </div>
-                          </div>
                         </div>
-                      );
-                    })
-                )}
-              </div>
-            </div>
-          </div>
+                    </div>
 
-          {/* Tráfico y Alertas */}
-          <div className="lg:col-span-2 space-y-6">
-            {renderSystemStatus()}
-
-            <div className="card p-4 cursor-default">
-              <h2 className="text-xl font-semibold text-white mb-4">Registro de Tráfico de Paquetes</h2>
-              <div id="traffic-log" className="h-96 overflow-y-auto bg-gray-900/50 p-3 rounded-lg flex flex-col-reverse">
-                {logs.length === 0 ? (
-                    <p className="text-gray-500 text-center pt-16">Esperando inicio de la auditoría...</p>
-                ) : (
-                    logs.map((log, index) => {
-                        const logClass = log.type === 'normal' ? 'log-normal' : log.type === 'warning' ? 'log-warning' : 'log-critical';
-                        return (
-                            <div key={index} className={`log-entry ${logClass}`}>
-                                <span>
-                                    <span className="text-gray-500 mr-2">{log.timestamp}</span>
-                                    <span className="text-cyan-400">{log.ip}</span>
-                                </span>
-                                <span className="text-gray-300">{log.message}</span>
+                    {/* Columna de Estado y Logs */}
+                    <div className="lg:col-span-2 space-y-6">
+                        {/* Panel de Estado del Sistema */}
+                        <div className="card p-4">
+                            <h2 className="text-xl font-semibold text-white mb-3">Estado del Sistema</h2>
+                            <div className="flex items-center gap-3 p-3 rounded-lg bg-gray-800">
+                                <div className={`w-4 h-4 rounded-full ${StatusBlock.colorClass}`} id="status-indicator"></div>
+                                <span className={`font-medium ${StatusBlock.colorClass.includes('red') ? 'text-red-400' : 'text-green-400'}`} id="status-text">{StatusBlock.text}</span>
                             </div>
-                        );
-                    })
-                )}
-              </div>
+                            
+                            {devices.filter(d => d.status === 'Blocked').length > 0 && (
+                                <div className="mt-4 p-3 rounded-lg border-l-4 bg-red-500/10 border-red-500 blinking">
+                                    <p className="font-bold text-red-400 flex items-center gap-2"><XCircle size={16} /> ¡AMENAZA CONTENIDA!</p>
+                                    <p className="text-sm text-gray-300">Uno o más dispositivos fueron bloqueados automáticamente por exceder la tasa de paquetes permitida. **Revise el log para detalles.**</p>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Panel de Logs */}
+                        <div className="card p-4">
+                            <h2 className="text-xl font-semibold text-white mb-4">Registro de Eventos</h2>
+                            <div id="traffic-log" ref={logContainerRef} className="h-96 overflow-y-auto bg-gray-900/50 p-3 rounded-lg">
+                                {log.length === 0 ? (
+                                    <p className="text-gray-500 text-center pt-16">Esperando eventos...</p>
+                                ) : (
+                                    log.map((entry, index) => (
+                                        <div key={index} className={`log-entry log-${entry.type} flex-col items-start`}>
+                                            <div className="flex justify-between w-full">
+                                                <span className="text-gray-300">{entry.message}</span>
+                                            </div>
+                                            <span className="text-gray-500 text-xs mt-1 self-end">{entry.timestamp}</span>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
-          </div>
+
+            {/* Modal de Detalle de Dispositivo */}
+            {modalOpen && selectedDevice && (
+                <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50">
+                    <div className="card w-full max-w-lg p-6">
+                        <h3 className="text-2xl font-bold mb-4 border-b border-gray-600 pb-2 flex items-center gap-3">
+                            <Wifi size={24} className="text-cyan-400" /> Detalle de {selectedDevice.id}
+                        </h3>
+
+                        {/* Estado y Métricas */}
+                        <div className="space-y-3 mb-6">
+                            <p className="text-lg">IP: <span className="font-mono text-cyan-400">{selectedDevice.ip}</span></p>
+                            <p className="text-lg">Estado: <span className={`font-bold ${selectedDevice.status === 'Blocked' ? 'text-red-500' : 'text-green-500'}`}>{selectedDevice.status}</span></p>
+                            
+                            <div className="grid grid-cols-2 gap-4 pt-2">
+                                <div className="p-3 bg-gray-800 rounded-lg">
+                                    <p className="text-sm text-gray-400 flex items-center gap-1"><Server size={14} /> Total Paquetes</p>
+                                    <p className="text-xl font-bold">{selectedDevice.packetCount.toLocaleString()}</p>
+                                </div>
+                                <div className="p-3 bg-gray-800 rounded-lg">
+                                    <p className="text-sm text-gray-400 flex items-center gap-1"><Zap size={14} /> Tasa Actual (5 ciclos)</p>
+                                    <p className="text-xl font-bold text-yellow-400">{selectedDevice.recentPacketHistory ? selectedDevice.recentPacketHistory.reduce((a, b) => a + b, 0).toLocaleString() : 0} Pkts</p>
+                                </div>
+                                <div className="p-3 bg-gray-800 rounded-lg col-span-2">
+                                    <p className="text-sm text-gray-400 flex items-center gap-1"><Router size={14} /> Último Tráfico</p>
+                                    <p className="text-lg font-bold">
+                                        {selectedDevice.last_protocol} 
+                                        {selectedDevice.last_port && <span> / Puerto: {selectedDevice.last_port}</span>}
+                                        <span className="text-gray-500 ml-3 text-sm">{selectedDevice.is_local ? '(Host Local)' : '(Host Remoto)'}</span>
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Control de Límite */}
+                        <div className="bg-gray-800 p-4 rounded-lg mb-6">
+                            <h4 className="font-semibold mb-2">Límite de Detección (Paquetes por Tasa)</h4>
+                            <div className="flex gap-2">
+                                <input
+                                    type="number"
+                                    value={newLimit}
+                                    onChange={(e) => setNewLimit(e.target.value)}
+                                    placeholder="Límite de Paquetes"
+                                    className="flex-grow p-2 rounded-lg bg-gray-700 text-white border border-gray-600 focus:border-cyan-500"
+                                    min="1"
+                                />
+                                <button
+                                    onClick={() => updateDeviceAction('limit', newLimit)}
+                                    className="bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-2 px-4 rounded-lg transition-colors"
+                                >
+                                    Guardar
+                                </button>
+                            </div>
+                            <p className="text-sm text-gray-400 mt-2">Umbral: {selectedDevice.packetLimit.toLocaleString()} paquetes en la ventana de 5 ciclos (aprox. 7.5s).</p>
+                        </div>
+
+                        {/* Botones de Acción */}
+                        <div className="flex justify-between gap-4">
+                            <button
+                                onClick={handleCloseModal}
+                                className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg transition-colors flex-grow"
+                            >
+                                Cerrar
+                            </button>
+                            {selectedDevice.status === 'Blocked' ? (
+                                <button
+                                    onClick={() => updateDeviceAction('unblock')}
+                                    className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 flex-grow"
+                                >
+                                    <Unlock size={18} /> Desbloquear
+                                </button>
+                            ) : (
+                                <button
+                                    onClick={() => updateDeviceAction('block')}
+                                    className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 flex-grow"
+                                >
+                                    <Lock size={18} /> Bloquear Manualmente
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
-        <DeviceModal />
-      </div>
-    </div>
-  );
+    );
 };
 
 export default App;

@@ -4,7 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "echo \"\n--- PASO 1: EJECUTAR BACKEND CON SUDO EN UNA NUEVA TERMINAL ---\n\" && echo \"Abra otra terminal y ejecute: npm run start:flask\" && echo \"\n--- PASO 2: INICIANDO FRONTEND ---\n\" && npm run start:react",
+    "start:react": "vite",
+    "start:flask": "cd python-back && sudo ./venv/bin/python3 network_server.py",
+    "postinstall": "npm run setup:python",
+    "setup:python": "cd python-back && echo \"--- Configurando entorno Python ---\" && python3 -m venv venv && ./venv/bin/pip install -r requirements.txt",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"
@@ -22,6 +26,7 @@
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.4",
     "babel-plugin-react-compiler": "^19.1.0-rc.3",
+    "concurrently": "^8.2.2",
     "eslint": "^9.36.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.22",
