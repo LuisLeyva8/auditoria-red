@@ -1,10 +1,95 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Zap, XCircle, CheckCircle, Lock, Unlock, Wifi, Server, Cpu, Router } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+// Importamos los componentes de Chart.js
+import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js';
+import { Line } from 'react-chartjs-2';
+import { 
+    Zap, XCircle, CheckCircle, Lock, Unlock, Wifi, Server, Cpu, Router, 
+    Search, Smartphone, Monitor, Tv, Settings, Globe, Fingerprint, BarChart, Layers 
+} from 'lucide-react';
+
+// Registramos los componentes de Chart.js
+ChartJS.register(
+    CategoryScale,
+    LinearScale,
+    PointElement,
+    LineElement,
+    Title,
+    Tooltip,
+    Legend
+);
 
 // --- CONFIGURACIÓN DEL FRONTEND ---
 const API_BASE_URL = 'http://127.0.0.1:5000/api';
-const REFRESH_INTERVAL_MS = 1500; // Frecuencia de petición al backend
-const DEFAULT_PACKET_LIMIT = 1500; // Constante utilizada si el dispositivo no tiene límite establecido
+const REFRESH_INTERVAL_MS = 1500; 
+const DEFAULT_PACKET_LIMIT = 1500; 
+const SNIFF_TIMEOUT_S = 3; // Coincide con el backend para cálculo de tasa (3s)
+
+// --- Mapeo de Tipos de Dispositivo a Iconos ---
+const DEVICE_ICONS = {
+    'PC/Laptop': Monitor,
+    'Móvil/Tablet': Smartphone,
+    'Servidor': Server,
+    'Doméstico/IoT (TV, etc.)': Tv,
+    'N/A': Settings, 
+};
+
+// --- Componente de Gráfico de Rendimiento ---
+const DeviceChart = ({ device, label, dataKey, color, unit }) => {
+    const data = {
+        labels: device[dataKey].map((_, i) => `C. ${i + 1}`), // Ciclos de la ventana
+        datasets: [
+            {
+                label: label,
+                data: device[dataKey],
+                borderColor: color,
+                backgroundColor: `${color}40`, // 40 es la opacidad
+                tension: 0.3,
+                pointRadius: 4,
+            },
+        ],
+    };
+
+    const options = {
+        responsive: true,
+        plugins: {
+            legend: { display: false },
+            title: {
+                display: true,
+                text: `${label} (Últimos ${device[dataKey].length} Ciclos)`,
+                color: '#E5E7EB',
+            },
+        },
+        scales: {
+            y: {
+                beginAtZero: true,
+                title: {
+                    display: true,
+                    text: unit,
+                    color: '#9CA3AF',
+                },
+                ticks: { color: '#9CA3AF' },
+                grid: { color: '#374151' },
+            },
+            x: {
+                ticks: { color: '#9CA3AF' },
+                grid: { color: '#374151' },
+            },
+        },
+    };
+
+    return <Line data={data} options={options} />;
+};
+
+// --- Utilidad para formatear Bytes a KB/s o MB/s ---
+const formatBytesPerSecond = (bytesPerCycle, total = false) => {
+    // Si es el total, solo formateamos los bytes sin dividir por el tiempo
+    let bytesToFormat = total ? bytesPerCycle : bytesPerCycle / SNIFF_TIMEOUT_S;
+
+    if (bytesToFormat < 1024) return `${bytesToFormat.toFixed(0)} B/s`;
+    if (bytesToFormat < 1024 * 1024) return `${(bytesToFormat / 1024).toFixed(2)} KB/s`;
+    return `${(bytesToFormat / (1024 * 1024)).toFixed(2)} MB/s`;
+};
+
 
 // Componente principal de la aplicación
 const App = () => {
@@ -19,6 +104,9 @@ const App = () => {
     const [selectedDevice, setSelectedDevice] = useState(null);
     const [modalOpen, setModalOpen] = useState(false);
     const [newLimit, setNewLimit] = useState('');
+
+    const [searchTerm, setSearchTerm] = useState('');
+    const [filterType, setFilterType] = useState('all'); 
 
     const intervalRef = useRef(null);
     const logContainerRef = useRef(null);
@@ -59,8 +147,25 @@ const App = () => {
             addLogEntry(`[ERROR] Desconectado del servidor Flask. ${error.message}`, 'critical');
         }
     }, [devices]);
+    
+    // -----------------------------------------------------------
+    // * NUEVO EFECTO: SINCRONIZAR EL MODAL CON LA ÚLTIMA VERSIÓN DE LOS DATOS *
+    // -----------------------------------------------------------
+    useEffect(() => {
+        // Solo ejecuta si el modal está abierto y hay un dispositivo seleccionado.
+        if (modalOpen && selectedDevice) {
+            // Busca la versión más reciente del dispositivo en la lista 'devices'
+            const updatedDevice = devices.find(d => d.ip === selectedDevice.ip);
+            
+            // Si lo encuentra y es diferente, actualiza el estado local del modal.
+            if (updatedDevice && JSON.stringify(updatedDevice) !== JSON.stringify(selectedDevice)) {
+                setSelectedDevice(updatedDevice);
+            }
+        }
+    }, [devices, modalOpen, selectedDevice]);
 
-    // Bucle de polling para actualizar el estado
+
+    // Bucle de polling para actualizar el estado (sin cambios)
     useEffect(() => {
         if (status.isRunning) {
             if (intervalRef.current) clearInterval(intervalRef.current);
@@ -83,11 +188,10 @@ const App = () => {
     }, [log]);
 
     // --- MANEJO DE ESTADO Y LOGS ---
-
+    
     const addLogEntry = (message, type = 'normal') => {
         setLog(prevLog => {
             const newEntry = { timestamp: new Date().toLocaleTimeString(), message, type };
-            // Limitar el log a 100 entradas
             return [...prevLog.slice(-99), newEntry]; 
         });
     };
@@ -98,11 +202,8 @@ const App = () => {
         fetchNetworkStatus();
     };
     
-    // Eliminada handleAttackSimulation
-
     const handleReset = async () => {
         clearInterval(intervalRef.current);
-        // Resetting all fields to initial state
         setStatus({ isRunning: false, isAttackMode: false, attackerIp: null, simulating: true });
         setDevices([]);
         setLog([]);
@@ -125,7 +226,6 @@ const App = () => {
         setSelectedDevice(null);
     };
 
-    // --- ACCIONES DE DISPOSITIVO (Bloqueo/Límite) ---
     const updateDeviceAction = async (action, limit = null) => {
         if (!selectedDevice) return;
 
@@ -140,13 +240,20 @@ const App = () => {
             if (response.ok) {
                 const updatedDevice = await response.json();
                 
-                // Actualizar estado local
                 setDevices(prevDevices => 
-                    prevDevices.map(d => d.ip === selectedDevice.ip ? { ...d, status: updatedDevice.device.status, packetLimit: updatedDevice.device.packetLimit } : d)
+                    prevDevices.map(d => d.ip === selectedDevice.ip ? { 
+                        ...d, 
+                        status: updatedDevice.device.status, 
+                        packetLimit: updatedDevice.device.packetLimit 
+                    } : d)
                 );
-                setSelectedDevice(prev => ({ ...prev, status: updatedDevice.device.status, packetLimit: updatedDevice.device.packetLimit }));
+                // NOTA: Se comenta la línea de setSelectedDevice para que el useEffect se encargue de la actualización:
+                // setSelectedDevice(prev => ({ 
+                //     ...prev, 
+                //     status: updatedDevice.device.status, 
+                //     packetLimit: updatedDevice.device.packetLimit 
+                // }));
                 
-                // Registro más detallado
                 if (action === 'block') addLogEntry(`[BLOQUEO MANUAL] Host ${selectedDevice.id} (${selectedDevice.ip}) bloqueado por administrador. Último protocolo: ${selectedDevice.last_protocol || 'N/A'}.`, 'critical');
                 if (action === 'unblock') addLogEntry(`[DESBLOQUEO MANUAL] Host ${selectedDevice.id} (${selectedDevice.ip}) desbloqueado.`, 'normal');
                 if (limit !== null) addLogEntry(`[LÍMITE] Límite de tasa para ${selectedDevice.ip} actualizado a ${newLimit} paquetes.`, 'normal');
@@ -157,6 +264,43 @@ const App = () => {
             console.error("Error al realizar acción:", error);
         }
     };
+    
+    // --- Lógica de Filtrado y Búsqueda ---
+    const filteredDevices = useMemo(() => {
+        return devices
+            .filter(device => {
+                if (filterType !== 'all' && device.deviceType !== filterType) {
+                    return false;
+                }
+
+                if (searchTerm.trim() === '') {
+                    return true;
+                }
+                
+                const lowerSearchTerm = searchTerm.toLowerCase();
+                const matchesIp = device.ip.toLowerCase().includes(lowerSearchTerm);
+                const matchesId = device.id.toLowerCase().includes(lowerSearchTerm);
+                const matchesMac = device.macAddress?.toLowerCase().includes(lowerSearchTerm);
+                const matchesManufacturer = device.manufacturer?.toLowerCase().includes(lowerSearchTerm);
+
+                return matchesIp || matchesId || matchesMac || matchesManufacturer;
+            })
+            .sort((a, b) => (a.status === 'Blocked' ? -1 : 1));
+    }, [devices, filterType, searchTerm]);
+
+    // Obtener la lista única de tipos de dispositivos para el filtro
+    const availableDeviceTypes = useMemo(() => {
+        const types = devices.map(d => d.deviceType).filter(Boolean);
+        return [...new Set(types)].sort();
+    }, [devices]);
+    
+    // Función para obtener el componente Icono del Dispositivo
+    const getDeviceIcon = (deviceType) => {
+        const IconComponent = DEVICE_ICONS[deviceType] || DEVICE_ICONS['N/A'];
+        return <IconComponent size={16} className="text-purple-400" title={deviceType} />;
+    };
+    // --- FIN Lógica de Filtrado y Búsqueda ---
+
 
     // --- RENDERIZADO DE UTILIDAD ---
     const getStatusIndicator = () => {
@@ -206,7 +350,7 @@ const App = () => {
                     )}
                 </header>
 
-                {/* Controles */}
+                {/* Controles Principales */}
                 <div className="card p-4 mb-6 flex flex-wrap justify-center items-center gap-4">
                     <button 
                         onClick={handleStartSimulation} 
@@ -222,38 +366,89 @@ const App = () => {
                         Reiniciar
                     </button>
                 </div>
+                
+                {/* SECCIÓN: BÚSQUEDA Y FILTRO */}
+                <div className="card p-4 mb-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="md:col-span-2 relative">
+                        <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={18} />
+                        <input
+                            type="text"
+                            placeholder="Buscar por IP, ID, MAC o Fabricante..." 
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            className="w-full p-2 pl-10 rounded-lg bg-gray-800 text-white border border-gray-700 focus:border-cyan-500"
+                        />
+                    </div>
+                    <div>
+                        <select
+                            value={filterType}
+                            onChange={(e) => setFilterType(e.target.value)}
+                            className="w-full p-2 rounded-lg bg-gray-800 text-white border border-gray-700 focus:border-cyan-500 appearance-none pr-8"
+                        >
+                            <option value="all">Filtrar por Tipo (Todos)</option>
+                            {availableDeviceTypes.map(type => (
+                                <option key={type} value={type}>{type}</option>
+                            ))}
+                        </select>
+                    </div>
+                </div>
+                {/* FIN SECCIÓN BÚSQUEDA Y FILTRO */}
+
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
                     {/* Columna de Dispositivos Conectados (Mejorada) */}
                     <div className="lg:col-span-1">
                         <div className="card p-4 h-full">
-                            <h2 className="text-xl font-semibold text-white mb-4 border-b border-gray-600 pb-2">Dispositivos Detectados ({devices.length})</h2>
+                            <h2 className="text-xl font-semibold text-white mb-4 border-b border-gray-600 pb-2">Dispositivos Detectados ({filteredDevices.length} de {devices.length})</h2>
                             <div id="device-list" className="space-y-3 max-h-96 overflow-y-auto pr-2">
                                 {devices.length === 0 ? (
                                     <p className="text-gray-500 text-center py-8">Esperando la detección de tráfico...</p>
+                                ) : filteredDevices.length === 0 ? (
+                                    <p className="text-gray-500 text-center py-8">No se encontraron dispositivos con los filtros aplicados.</p>
                                 ) : (
-                                    devices.map(device => (
+                                    filteredDevices.map(device => (
                                         <div 
                                             key={device.ip} 
                                             className={`card p-3 flex justify-between items-center transition-all duration-300 cursor-pointer hover:bg-gray-700 ${device.status === 'Blocked' ? 'border-red-500 border-l-4' : 'border-l-4 border-transparent'}`}
                                             onClick={() => handleOpenModal(device)}
                                         >
                                             <div className="flex flex-col">
+                                                {/* Icono de Dispositivo y Título */}
                                                 <p className="font-semibold text-white flex items-center gap-2">
                                                     {device.status === 'Blocked' ? <XCircle size={16} className="text-red-500" /> : <CheckCircle size={16} className="text-green-500" />}
+                                                    {getDeviceIcon(device.deviceType)}
                                                     {device.id} 
                                                     {device.is_local ? <Router size={16} className="text-blue-400 ml-1" title="Host Local" /> : null}
                                                 </p>
                                                 <p className="text-xs text-gray-400 font-mono">{device.ip}</p>
+                                                <p className="text-xs text-gray-400 mt-1">
+                                                    Tipo: <span className="text-purple-300 ml-1 font-semibold">{device.deviceType || 'N/A'}</span>
+                                                </p>
+                                                {device.macAddress && (
+                                                     <p className="text-xs text-cyan-400 mt-1 flex items-center gap-1">
+                                                        <Fingerprint size={12} />
+                                                        Fabricante: <span className="font-semibold text-cyan-300">{device.manufacturer || 'N/A'}</span>
+                                                    </p>
+                                                )}
+                                                <p className="text-xs text-gray-500 mt-1 font-mono">
+                                                    MAC: {device.macAddress || 'N/A'}
+                                                </p>
                                                 <p className="text-xs text-gray-500 mt-1">
                                                     Último Protocolo: 
                                                     <span className="font-mono text-cyan-400 ml-1">{device.last_protocol || 'N/A'}</span>
                                                     {device.last_port && <span className="text-gray-600 ml-2">Puerto: {device.last_port}</span>}
                                                 </p>
+                                                {device.last_visited_domain && device.last_visited_domain !== "N/A o Protocolo No Web" && (
+                                                    <p className="text-xs text-yellow-400 mt-1 flex items-center gap-1">
+                                                        <Globe size={12} />
+                                                        Dominio: <span className="font-mono text-yellow-300">{device.last_visited_domain}</span>
+                                                    </p>
+                                                )}
                                             </div>
                                             <div className="text-right">
                                                 <p className="font-mono text-white text-lg">{device.packetCount.toLocaleString()} Pkts</p>
+                                                <p className="font-mono text-sm text-green-400">{formatBytesPerSecond(device.recentBandwidthRate.reduce((a, b) => a + b, 0))}</p>
                                                 <div className={`flex items-center justify-end gap-1 text-sm ${device.status === 'Blocked' ? 'text-red-500' : 'text-green-400'}`}>
                                                     <span>{device.status}</span>
                                                 </div>
@@ -265,7 +460,7 @@ const App = () => {
                         </div>
                     </div>
 
-                    {/* Columna de Estado y Logs */}
+                    {/* Columna de Estado y Logs (sin cambios) */}
                     <div className="lg:col-span-2 space-y-6">
                         {/* Panel de Estado del Sistema */}
                         <div className="card p-4">
@@ -305,7 +500,7 @@ const App = () => {
                 </div>
             </div>
 
-            {/* Modal de Detalle de Dispositivo */}
+            {/* Modal de Detalle de Dispositivo (Actualizado) */}
             {modalOpen && selectedDevice && (
                 <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50">
                     <div className="card w-full max-w-lg p-6">
@@ -318,28 +513,80 @@ const App = () => {
                             <p className="text-lg">IP: <span className="font-mono text-cyan-400">{selectedDevice.ip}</span></p>
                             <p className="text-lg">Estado: <span className={`font-bold ${selectedDevice.status === 'Blocked' ? 'text-red-500' : 'text-green-500'}`}>{selectedDevice.status}</span></p>
                             
-                            <div className="grid grid-cols-2 gap-4 pt-2">
+                            <div className="grid grid-cols-2 gap-4">
+                                <p className="text-lg flex items-center gap-2">
+                                    {getDeviceIcon(selectedDevice.deviceType)}
+                                    Tipo: <span className="font-bold text-purple-300">{selectedDevice.deviceType || 'N/A'}</span>
+                                </p>
+                                {/* --- NUEVO: Fingerprinting de SO --- */}
+                                <p className="text-lg flex items-center gap-2">
+                                    <Cpu size={20} className="text-orange-400" />
+                                    SO Estimado: <span className="font-bold text-orange-300">{selectedDevice.os_fingerprint || 'N/A'}</span>
+                                </p>
+                                {/* ----------------------------------- */}
+                            </div>
+                            
+                            <p className="text-lg flex items-center gap-2 pt-2">
+                                <Fingerprint size={20} className="text-cyan-400" />
+                                Fabricante: <span className="font-bold text-cyan-300">{selectedDevice.manufacturer || 'N/A'}</span>
+                            </p>
+
+                            <p className="text-lg flex items-center gap-2 pt-2">
+                                <Globe size={20} className="text-yellow-400" />
+                                Último Dominio: 
+                                <span className="font-mono text-yellow-300 break-all">{selectedDevice.last_visited_domain || 'N/A'}</span>
+                            </p>
+                            
+                            <div className="grid grid-cols-2 gap-4 pt-4">
                                 <div className="p-3 bg-gray-800 rounded-lg">
-                                    <p className="text-sm text-gray-400 flex items-center gap-1"><Server size={14} /> Total Paquetes</p>
+                                    <p className="text-sm text-gray-400 flex items-center gap-1"><Server size={14} /> Paquetes Totales</p>
                                     <p className="text-xl font-bold">{selectedDevice.packetCount.toLocaleString()}</p>
                                 </div>
                                 <div className="p-3 bg-gray-800 rounded-lg">
-                                    <p className="text-sm text-gray-400 flex items-center gap-1"><Zap size={14} /> Tasa Actual (5 ciclos)</p>
+                                    <p className="text-sm text-gray-400 flex items-center gap-1"><Layers size={14} /> Bytes Totales</p>
+                                    <p className="text-xl font-bold">{formatBytesPerSecond(selectedDevice.bandwidthHistoryTotal, true)}</p>
+                                </div>
+                                <div className="p-3 bg-gray-800 rounded-lg">
+                                    <p className="text-sm text-gray-400 flex items-center gap-1"><Zap size={14} /> Tasa Paquetes (5 ciclos)</p>
                                     <p className="text-xl font-bold text-yellow-400">{selectedDevice.recentPacketHistory ? selectedDevice.recentPacketHistory.reduce((a, b) => a + b, 0).toLocaleString() : 0} Pkts</p>
                                 </div>
-                                <div className="p-3 bg-gray-800 rounded-lg col-span-2">
-                                    <p className="text-sm text-gray-400 flex items-center gap-1"><Router size={14} /> Último Tráfico</p>
-                                    <p className="text-lg font-bold">
-                                        {selectedDevice.last_protocol} 
-                                        {selectedDevice.last_port && <span> / Puerto: {selectedDevice.last_port}</span>}
-                                        <span className="text-gray-500 ml-3 text-sm">{selectedDevice.is_local ? '(Host Local)' : '(Host Remoto)'}</span>
+                                {/* --- NUEVO: Tasa de Ancho de Banda --- */}
+                                <div className="p-3 bg-gray-800 rounded-lg">
+                                    <p className="text-sm text-gray-400 flex items-center gap-1"><BarChart size={14} /> Tasa Ancho Banda (5 ciclos)</p>
+                                    <p className="text-xl font-bold text-green-400">
+                                        {formatBytesPerSecond(selectedDevice.recentBandwidthRate.reduce((a, b) => a + b, 0))}
                                     </p>
                                 </div>
+                                {/* -------------------------------------- */}
                             </div>
                         </div>
 
+                        {/* --- Gráficos de Tendencia en Vivo --- */}
+                        <div className="space-y-6">
+                            <div className="card p-4">
+                                <DeviceChart 
+                                    device={selectedDevice} 
+                                    label="Tasa de Paquetes" 
+                                    dataKey="recentPacketHistory" 
+                                    color="#F59E0B" 
+                                    unit="Paquetes"
+                                />
+                            </div>
+                            <div className="card p-4">
+                                <DeviceChart 
+                                    device={selectedDevice} 
+                                    label="Tasa de Ancho de Banda (Bytes)" 
+                                    dataKey="recentBandwidthRate" 
+                                    color="#10B981" 
+                                    unit="Bytes"
+                                />
+                                <p className="text-xs text-gray-500 mt-2 text-center">Nota: La escala de Y muestra Bytes acumulados en el ciclo de {SNIFF_TIMEOUT_S}s.</p>
+                            </div>
+                        </div>
+                        {/* --- FIN Gráficos de Tendencia --- */}
+
                         {/* Control de Límite */}
-                        <div className="bg-gray-800 p-4 rounded-lg mb-6">
+                        <div className="bg-gray-800 p-4 rounded-lg mt-6">
                             <h4 className="font-semibold mb-2">Límite de Detección (Paquetes por Tasa)</h4>
                             <div className="flex gap-2">
                                 <input
@@ -361,7 +608,7 @@ const App = () => {
                         </div>
 
                         {/* Botones de Acción */}
-                        <div className="flex justify-between gap-4">
+                        <div className="flex justify-between gap-4 pt-4">
                             <button
                                 onClick={handleCloseModal}
                                 className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg transition-colors flex-grow"
