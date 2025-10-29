@@ -1,0 +1,30 @@
+# ----------------------------------------------------
+# 1. ETAPA DE CONSTRUCCIÓN: Compilación del Frontend (Node/Vite)
+# ----------------------------------------------------
+FROM node:20-slim AS builder
+
+WORKDIR /app
+
+# Copiar package.json y package-lock.json para la instalación de dependencias
+COPY package*.json ./
+# Ignorar el script postinstall que intenta configurar Python
+RUN npm set-script postinstall "" 
+RUN npm install
+
+# Copiar el código fuente
+COPY . .
+
+# Construir el proyecto React. El resultado estará en el directorio 'dist'.
+RUN npm run build
+
+# ----------------------------------------------------
+# 2. ETAPA DE PRODUCCIÓN: Servir el Frontend (Nginx)
+# ----------------------------------------------------
+FROM nginx:alpine
+
+# Copiar la configuración personalizada de Nginx
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Puerto por defecto de Nginx: 80
+EXPOSE 80
+# El comando por defecto de Nginx ya sirve el contenido.

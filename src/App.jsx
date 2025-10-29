@@ -19,7 +19,7 @@ ChartJS.register(
 );
 
 // --- CONFIGURACIÓN DEL FRONTEND ---
-const API_BASE_URL = 'http://127.0.0.1:5000/api';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5000/api';
 const REFRESH_INTERVAL_MS = 1500; 
 const DEFAULT_PACKET_LIMIT = 1500; 
 const SNIFF_TIMEOUT_S = 3; // Coincide con el backend para cálculo de tasa (3s)

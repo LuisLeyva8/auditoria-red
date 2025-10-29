@@ -6,7 +6,6 @@ __pycache__/
 *.so
 .python-version
 .pytest_cache/
-.env
 .flaskenv
 node_modules
 dist/
